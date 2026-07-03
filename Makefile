@@ -1,7 +1,7 @@
 SKYLIGHT_AVAILABLE := $(shell test -d /System/Library/PrivateFrameworks/SkyLight.framework && echo 1 || echo 0)
 override CXXFLAGS += -O2 -Wall -fobjc-arc -D"NS_FORMAT_ARGUMENT(A)=" -D"SKYLIGHT_AVAILABLE=$(SKYLIGHT_AVAILABLE)"
 
-.PHONY: all clean install build run debug update
+.PHONY: all clean install build run debug update test
 
 all: AutoRaise AutoRaise.app
 
@@ -33,3 +33,6 @@ debug: build
 	./AutoRaise -focusDelay 1 -verbose 1
 
 update: build install
+
+test: DisplayFocusGate.h test_display_focus_gate.cpp
+	g++ -std=c++17 -Wall -o test_display_focus_gate test_display_focus_gate.cpp && ./test_display_focus_gate
