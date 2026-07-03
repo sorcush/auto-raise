@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         rebuildMenu()
         if enabled { engine.start(delayMs: delayMs) }
+        showFirstRunAccessibilityNoticeIfNeeded()
     }
 
     @objc private func rebuildMenu() {
@@ -57,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         login.state = LoginItem.isEnabled ? .on : .off
         login.target = self
         menu.addItem(login)
+
+        let axItem = NSMenuItem(title: "Open Accessibility Settings…",
+            action: #selector(openAccessibility), keyEquivalent: "")
+        axItem.target = self
+        menu.addItem(axItem)
 
         menu.addItem(.separator())
 
@@ -90,6 +96,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleLogin() {
         LoginItem.setEnabled(!LoginItem.isEnabled)
         rebuildMenu()
+    }
+
+    @objc private func openAccessibility() {
+        let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+
+    private func showFirstRunAccessibilityNoticeIfNeeded() {
+        guard !defaults.bool(forKey: "didShowAXNotice") else { return }
+        defaults.set(true, forKey: "didShowAXNotice")
+        let alert = NSAlert()
+        alert.messageText = "Grant Accessibility to AutoRaise"
+        alert.informativeText = """
+            AutoRaise needs Accessibility permission to focus windows. In the \
+            settings window that opens, enable the entry named "AutoRaiseEngine", \
+            then toggle AutoRaise off and on from the menu bar.
+            """
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn { openAccessibility() }
     }
 
     @objc private func quit() {
