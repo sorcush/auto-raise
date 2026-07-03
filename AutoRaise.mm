@@ -27,6 +27,7 @@
 #include <AppKit/AppKit.h>
 #include <Carbon/Carbon.h>
 #include <libproc.h>
+#include "DisplayFocusGate.h"
 
 #define AUTORAISE_VERSION "5.6"
 #define STACK_THRESHOLD 20
@@ -159,6 +160,9 @@ static int delayTicks = 0;
 static int delayCount = 0;
 static int pollMillis = 0;
 static int disableKey = 0;
+static CGDirectDisplayID lastDisplayID = 0;
+static bool lastDisplayIDValid = false;
+static bool displayFocusArmed = false;
 
 //----------------------------------------yabai focus only methods------------------------------------------
 
@@ -983,6 +987,7 @@ void onTick() {
     float mouse_x_diff = mousePoint.x-oldPoint.x;
     float mouse_y_diff = mousePoint.y-oldPoint.y;
     oldPoint = mousePoint;
+    CGPoint gateMousePoint = mousePoint; // raw location, before macOS-12 corrections
 
     bool mouseMoved = fabs(mouse_x_diff) > mouseDelta;
     mouseMoved = mouseMoved || fabs(mouse_y_diff) > mouseDelta;
@@ -1048,19 +1053,34 @@ void onTick() {
     } else if (appWasActivated) {
         appWasActivated = false;
         return;
-    } else if (spaceHasChanged) {
-        // spaceHasChanged has priority
-        // over waiting for the delay
-        if (mouseMoved) { return; }
-        else if (!ignoreSpaceChanged) {
-            raiseTimes = 3;
-            delayTicks = 0;
+    }
+
+    // Display-change focus mode: a Space change alone must never focus.
+    // Clear the flag without arming a raise (replaces stock space auto-raise).
+    if (spaceHasChanged) { spaceHasChanged = false; }
+
+    // Arm a one-shot focus when the cursor crosses onto a different display.
+    // Must run before the requireMouseStop early-return below, because a crossing
+    // always happens mid-motion.
+    {
+        NSScreen * gateScreen = findScreen(gateMousePoint);
+        bool hasScreen = gateScreen != nil;
+        CGDirectDisplayID currentDisplayID = hasScreen ?
+            (CGDirectDisplayID)[gateScreen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : 0;
+        GateDecision gateDecision = displayFocusGate(
+            currentDisplayID, hasScreen, (delayTicks != 0 || raiseTimes != 0),
+            lastDisplayID, lastDisplayIDValid, displayFocusArmed);
+        if (gateDecision.armJustSet) {
+            delayTicks = 0; // restart the delay for the new one-shot cycle
+            if (verbose) { NSLog(@"Display crossing: armed one-shot focus"); }
         }
-        spaceHasChanged = false;
-    } else if (requireMouseStop && !mouseStopped && mouseMoved) {
+        if (!gateDecision.proceed) { return; } // silent within a display
+    }
+
+    // Wait for the mouse to stop before starting/continuing the delay.
+    if (requireMouseStop && !mouseStopped && mouseMoved) {
         delayTicks = 0;
-        // propagate the mouseMoved event
-        // to restart the delay if needed
+        // propagate the mouseMoved event to restart the delay if needed
         propagateMouseMoved = true;
         return;
     }
@@ -1218,6 +1238,7 @@ void onTick() {
                     }
                     if (raiseTimes || delayTicks == 1) {
                         delayTicks = 0; // disable delay
+                        displayFocusArmed = false; // one focus per crossing
 
                         if (raiseTimes) { raiseTimes--; }
                         else { raiseTimes = 3; }
