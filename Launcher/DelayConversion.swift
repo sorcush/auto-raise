@@ -2,7 +2,7 @@ import Foundation
 
 /// Pure conversions between a user-facing delay (ms) and the engine's -delay units.
 enum DelayConversion {
-    static let pollMillis = 50
+    static let pollMillis = 5
     static let maxDelayMs = 2000
 
     /// Clamp to [0, maxDelayMs] and snap to a pollMillis multiple.

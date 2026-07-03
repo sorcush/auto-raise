@@ -866,7 +866,7 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
         parameters[kDelay] = @"1";
     }
     if (!parameters[kRequireMouseStop]) { parameters[kRequireMouseStop] = @"true"; }
-    if ([parameters[kPollMillis] intValue] < 20) { parameters[kPollMillis] = @"50"; }
+    if ([parameters[kPollMillis] intValue] < 5) { parameters[kPollMillis] = @"50"; }
     if ([parameters[kMouseDelta] floatValue] < 0) { parameters[kMouseDelta] = @"0"; }
     if ([parameters[kScale] floatValue] < 1) { parameters[kScale] = @"2.0"; }
     if (!parameters[kDisableKey]) { parameters[kDisableKey] = @"control"; }
