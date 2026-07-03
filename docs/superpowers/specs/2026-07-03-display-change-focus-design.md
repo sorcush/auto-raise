@@ -293,10 +293,14 @@ checkbox unchecked.
 - **Deployment target:** macOS 13.0 (for `SMAppService`).
 - **Delay UI:** Preferences window with a 0–2000 ms stepper (50 ms step).
 
-## Open questions for the user
+## Open questions for the user — resolved
 
-- **Signing:** ad-hoc/self-signed is assumed sufficient (personal use). Confirm no
-  notarized/Developer-ID requirement.
-- **Config file location:** the launcher will manage `~/.config/AutoRaise/config`.
-  Confirm you are not also hand-editing `~/.AutoRaise` (only one is read; the
-  `~/.AutoRaise` dotfile takes precedence if present).
+- **Signing:** ad-hoc / self-signed, personal use only. No notarization /
+  Developer-ID. Signature must stay stable across rebuilds so the Accessibility
+  grant persists.
+- **Config file location:** the launcher owns `~/.config/AutoRaise/config`. The
+  user has **no** `~/.AutoRaise` and no existing config file (verified absent on
+  disk 2026-07-03), so there is nothing to shadow or migrate; the launcher creates
+  the config file on first run.
+
+No open questions remain.
