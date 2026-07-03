@@ -54,33 +54,50 @@ spawns the engine, and terminates the process to stop it. No IPC beyond that.
   doesn't count as a crossing.
 - `displayFocusArmed` — `bool`, whether a one-shot focus is pending.
 
-### Logic in `onTick()`
+### Logic in `onTick()` — explicit ordering
 
-Injected after the existing mouse-point read and the macOS-12 coordinate
-correction block (so `oldCorrectedPoint` stays fresh), before the raise-decision
-block:
+The current `onTick()` maintains non-focus housekeeping state (`ignoreTimes`
+decrement, `appWasActivated` reset, and the `spaceHasChanged` branch) *after* the
+correction block. A naive early `return` while disarmed would leave that state
+stale — most importantly, a `spaceHasChanged` flag set during a Space switch while
+disarmed would survive, and the next display crossing would hit the
+`spaceHasChanged` branch (sets `raiseTimes = 3; delayTicks = 0`) and fire an
+**immediate raise, bypassing the configured delay.** So the ordering is explicit:
 
-1. Determine the current display: `findScreen(mousePoint)`, then read its
+1. Mouse-point read and the macOS-12 coordinate correction block run as today
+   (keeps `oldCorrectedPoint` fresh).
+2. **Always clear non-focus housekeeping first, every tick, armed or not:**
+   - `ignoreTimes`: decrement/consume as today.
+   - `appWasActivated`: reset as today.
+   - `spaceHasChanged`: in this mode, **clear it without raising** — remove the
+     `raiseTimes = 3; delayTicks = 0` auto-raise; a space change alone must never
+     focus. (Only a display crossing arms a focus.)
+3. Determine the current display: `findScreen(mousePoint)`, then read its
    `NSScreenNumber` (`CGDirectDisplayID`). If `findScreen` returns `nil` (cursor
    between/off screens), treat as *no crossing* — skip crossing detection this tick.
-2. **Crossing detection:** if `lastDisplayIDValid` and
+4. **Crossing detection:** if `lastDisplayIDValid` and
    `currentDisplayID != lastDisplayID`, set `displayFocusArmed = true` and reset
    `delayTicks = 0` (restart the delay for the new cycle).
-3. Update `lastDisplayID = currentDisplayID`; set `lastDisplayIDValid = true`.
-4. **Gate:** `if (!displayFocusArmed && !delayTicks && !raiseTimes) return;`
+5. Update `lastDisplayID = currentDisplayID`; set `lastDisplayIDValid = true`.
+6. **Gate:** `if (!displayFocusArmed && !delayTicks && !raiseTimes) return;`
    - When disarmed and no cycle is in progress, do nothing — this is what kills
-     continuous focus-follows-mouse (silence within a display) and also suppresses
-     stock space-change auto-raise.
+     continuous focus-follows-mouse (silence within a display). Because step 2
+     already ran, no housekeeping state is left stale by this return.
    - `delayTicks`/`raiseTimes` in the condition let an *in-progress* focus cycle
      (delay counting down, or the stubborn-app multi-raise repeats) run to
      completion even after `displayFocusArmed` is cleared.
-5. The existing delay + mouse-stop + ignore-list + drag-abort + raise/focus logic
+7. The existing delay + mouse-stop + ignore-list + drag-abort + raise/focus logic
    runs unchanged when the gate passes.
-6. **Disarm:** the moment a raise/focus is actually committed (at the
+8. **Disarm:** the moment a raise/focus is actually committed (at the
    `raiseAndActivate(...)` call, and the `FOCUS_FIRST` focus path if compiled with
    it), set `displayFocusArmed = false`. `raiseTimes` continues to drain over the
    next few ticks (allowed by the gate), completing the multi-raise, after which
    the gate blocks further activity until the next crossing.
+
+The implementation plan should factor the display-gating decision into a small,
+independently testable function (input: current display id, prior display id,
+armed flag, in-progress flags → output: arm/return/proceed) so the state machine
+can be unit-tested without the full AppKit event loop.
 
 ### Behavior guarantees (from approved Section 1)
 
@@ -120,50 +137,166 @@ project), trimmed to what we need and pointed at our modified engine.
 
 ### Preferences (persisted in `UserDefaults`)
 
-- `enabled` (Bool) — whether the engine should be running.
-- `delayMs` (Int) — user-configured delay in milliseconds.
-- `startAtLogin` (Bool).
+- `enabled` (Bool, default `true`) — whether the engine should be running.
+- `delayMs` (Int, default `200`) — user-configured delay in milliseconds.
+- `startAtLogin` (Bool, default `false`).
 
 On launch: read prefs, apply login registration, and if `enabled` start the engine.
 
-### Running the engine
+**Delay UI — one concrete choice.** A small **Preferences window** opened from the
+menu, containing a labeled `NSStepper` + text field bound to `delayMs`:
 
-- `startService`: locate the bundled engine binary
-  (`…/Contents/MacOS/AutoRaise` or `…/Contents/Resources/`), spawn via `Process`
-  with arguments. Delay conversion: the engine's `-delay` is in units of
-  `pollMillis` where `1` = no delay and each extra unit adds one `pollMillis`
-  (default 50 ms). So `delayUnits = max(1, round(delayMs / 50) + 1)`; the launcher
-  enforces a minimum of `1` (delay `0` disables raising in the engine).
-- `stopService`: `terminate()` + `waitUntilExit()`.
-- Changing the delay while enabled restarts the subprocess with new args.
+- Range **0–2000 ms**, step **50 ms** (aligns with the engine's `pollMillis`
+  granularity). Values are clamped to the range; non-numeric text reverts to the
+  last valid value (no free-form invalid state).
+- `0 ms` is allowed and maps to the engine minimum (`delayUnits = 1`, fire as soon
+  as the mouse settles after a crossing).
+- Changing the value rewrites the config `delay=` line and restarts the engine if
+  `enabled`.
+
+### Running the engine — and preserving user config
+
+**Config-preservation constraint (verified against `AutoRaise.mm:808`).**
+`readConfig:` reads the `~/.AutoRaise` / `~/.config/AutoRaise/config` file **only
+when `argc == 1`** (no CLI args). If the launcher spawned the engine with
+`-delay X`, `argc > 1` and the hidden config file is entirely ignored — silently
+discarding any `ignoreApps`, `ignoreTitles`, `stayFocusedBundleIds`, `disableKey`,
+etc. the user set there. To avoid that regression:
+
+- The launcher **writes the delay into the config file** (`~/.config/AutoRaise/config`,
+  the `delay=` key) rather than passing it as a CLI arg, and **spawns the engine
+  with no arguments** so it loads the full config file. This preserves every other
+  setting the user has. The launcher only ever rewrites the `delay=` line; other
+  lines are left untouched (read-modify-write, preserving comments/order).
+- Delay conversion: the engine's `-delay` is in units of `pollMillis` where `1`
+  = no delay and each extra unit adds one `pollMillis` (default 50 ms). So
+  `delayUnits = max(1, round(delayMs / 50) + 1)`; enforce a minimum of `1`
+  (delay `0` disables raising in the engine).
+
+- `startService`: locate the bundled engine binary at
+  `…/Contents/MacOS/AutoRaise` (single agreed location — the engine ships next to
+  the launcher executable in the bundle), then spawn via `Process` argless.
+- `stopService`: `terminate()`, then wait with a **bounded timeout** (e.g. 2 s) on
+  a background queue — never block the main/UI thread on `waitUntilExit()`; if the
+  process has not exited, escalate to `SIGKILL`.
+- Changing the delay while enabled rewrites the config line and restarts the
+  subprocess.
+
+### Process lifecycle & error handling
+
+`enabled` is the user's *intent*; the actual subprocess state is tracked
+separately and reconciled:
+
+- Set `Process.terminationHandler` to detect crashes / unexpected exits. On an
+  unexpected exit while `enabled` is true, update the menu state (uncheck / show an
+  error affordance) rather than silently believing it is still running. Do **not**
+  auto-restart in a tight loop; offer a manual re-enable.
+- Handle spawn failure and missing/unexecutable binary with a user-visible message
+  (menu item disabled + explanatory tooltip/alert), not a silent no-op.
+- On launcher quit, stop the engine (bounded, as above).
 
 ### Start-at-Login
 
-Use `SMAppService.mainApp` (`register()` / `unregister()`, ServiceManagement,
-macOS 13+) — the user's macOS is current, so the modern API applies. The
-incomplete login handling in lhaeger's original is replaced by this.
+- **Deployment target: macOS 13.0** (Ventura). Use `SMAppService.mainApp`
+  (`register()` / `unregister()`, ServiceManagement). The user's macOS is current,
+  so this is safe; 13.0 is stated explicitly rather than assumed. The incomplete
+  login handling in lhaeger's original is replaced by this.
+- If `register()` throws, surface the error and leave the checkbox unchecked
+  (reflect actual registration state, not intent).
+
+### Accessibility / TCC ownership
+
+The **engine** child process is what makes the Accessibility API calls
+(`AXIsProcessTrusted`, `AXUIElementCopyAttributeValue`, event taps), so it — not
+the launcher — must hold the Accessibility grant. macOS attributes TCC by the
+running binary's identity, so:
+
+- Both the launcher and the bundled engine binary are signed with the **same
+  signing identity / Team ID** (ad-hoc/self-signed is acceptable for personal use,
+  but must be stable across rebuilds so the grant persists — a changing signature
+  forces re-authorization each build).
+- **First-run UX:** on enable, if the engine reports it is not trusted (or focus
+  never happens), the launcher shows a menu affordance / alert linking to
+  System Settings → Privacy & Security → Accessibility, and the user grants the
+  **engine binary** (path inside the bundle). This mirrors how lhaeger's wrapper
+  already works in practice.
+- The launcher itself needs no Accessibility permission.
 
 ### Bundle / build
 
 - New bundle identifier (e.g. `local.autoraise.displayfocus`); own `Info.plist`
   with `LSUIElement` true (menu-bar only, no Dock icon).
-- Xcode build phase compiles `AutoRaise.mm` into the app bundle's `MacOS`
-  directory (mirroring lhaeger's build-script approach), so one Xcode build
-  produces the whole app with the engine embedded.
+- **Build ownership:** the **Xcode project is the single source of truth** for
+  producing the shipping app. An Xcode "Run Script" build phase compiles
+  `AutoRaise.mm` (via `g++ … -framework AppKit [-framework SkyLight]`, matching the
+  existing `Makefile` flags) into the bundle's `Contents/MacOS/AutoRaise`. The
+  existing `Makefile` is **retained only** for building/verifying the engine
+  standalone from the command line during development; it does not build the
+  launcher. (This resolves the earlier "make vs Xcode" ambiguity.)
+- **Icon:** reuse the repo's existing `AutoRaise.icns` (present in repo root) for
+  the app icon and lhaeger's `Menu.png` for the status-item template image; if a
+  template image is unavailable, fall back to a system symbol.
+
+### Upstream source provenance
+
+- Engine: `sbmpost/AutoRaise` **v5.6** (the `AutoRaise.mm` in this repo), modified.
+- Launcher: vendored from `lhaeger/AutoRaise` — **pin the exact upstream commit
+  hash** in the plan. Files taken/adapted: `Launcher/AppDelegate.swift` (rewritten
+  for our trimmed feature set), `Launcher/Info.plist`, and the `Menu.png`/`Prefs.png`
+  assets. The MASShortcut/hotkey, warp, and cursor-scaling code is **not** vendored.
+- Both projects' licenses (see `LICENSE.md`) are carried forward; note the license
+  and attribution in the plan before vendoring.
 
 ## Testing / verification
 
-- **Engine, manual on multi-monitor:** run the CLI binary with `-verbose true`;
-  confirm (a) no focus while moving within one display, (b) exactly one focus
-  after crossing and settling on a window, (c) empty-desktop-then-window still
-  fires once, (d) crossing back re-arms.
-- **Delay:** verify the configured delay is respected before the fire.
-- **Single-display sanity:** confirm the engine stays silent (no crashes, no
-  spurious focus).
-- **Launcher:** toggle Enable/Disable starts/stops the process; changing delay
-  takes effect; Start-at-Login registers and survives a reboot.
+**Unit-testable state machine:** the display-gating decision function (see
+onTick step list) gets direct unit tests for the arm/disarm truth table:
+within-display move, crossing, empty-desktop-stays-armed, already-focused-window,
+startup seeding, `findScreen==nil`.
 
-## Open questions
+**Engine, manual on multi-monitor** (`-verbose true`): (a) no focus while moving
+within one display, (b) exactly one focus after crossing and settling, (c)
+empty-desktop-then-window still fires once, (d) crossing back re-arms, (e)
+configured delay is respected before the fire.
 
-None outstanding — behavior rule, replace-default, and launcher scope are all
-confirmed.
+**Regression scenarios (from review):**
+- **Config preservation:** with an `~/.config/AutoRaise/config` containing
+  `ignoreApps`/`ignoreTitles`/etc., confirm those still take effect when the
+  launcher runs the engine (i.e. engine launched argless, config file rewritten
+  only at the `delay=` line).
+- **Space change while disarmed:** switch Spaces without crossing displays →
+  **no** focus; then cross displays → fires after the normal delay (not
+  immediately). Guards against the stale-`spaceHasChanged` bug.
+- **Accessibility denied:** engine not trusted → launcher surfaces the permission
+  affordance; no crash.
+- **Child crash / manual kill:** kill the engine process → menu state reconciles
+  (unchecks / error), no tight restart loop.
+- **cmd-tab / app activation:** confirm task-switch activation is not mis-handled
+  by the new gate (drag-abort and `appWasActivated` paths still respected).
+- **Single-display sanity:** engine stays silent, no crashes, no spurious focus.
+
+**Launcher:** Enable/Disable starts/stops the process (bounded stop, no UI hang);
+changing delay rewrites config + restarts and takes effect; Start-at-Login
+registers via `SMAppService` and survives a reboot; failed registration leaves the
+checkbox unchecked.
+
+## Resolved decisions (formerly open)
+
+- **onTick ordering:** housekeeping cleared before the gate; space-change
+  auto-raise removed in this mode. (Resolves stale-state / delay-bypass bug.)
+- **Config preservation:** launcher writes the `delay=` line into the config file
+  and launches the engine argless, so other user settings survive.
+- **Build ownership:** Xcode project builds the shipping app (compiles the engine
+  via a build phase); `Makefile` retained for standalone engine dev only.
+- **TCC:** the bundled engine binary owns Accessibility; launcher and engine share
+  a stable signing identity; first-run permission UX defined.
+- **Deployment target:** macOS 13.0 (for `SMAppService`).
+- **Delay UI:** Preferences window with a 0–2000 ms stepper (50 ms step).
+
+## Open questions for the user
+
+- **Signing:** ad-hoc/self-signed is assumed sufficient (personal use). Confirm no
+  notarized/Developer-ID requirement.
+- **Config file location:** the launcher will manage `~/.config/AutoRaise/config`.
+  Confirm you are not also hand-editing `~/.AutoRaise` (only one is read; the
+  `~/.AutoRaise` dotfile takes precedence if present).
