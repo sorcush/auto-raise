@@ -3,3 +3,4 @@ AutoRaise.out
 AutoRaise.app
 test_display_focus_gate
 *~
+.build/
