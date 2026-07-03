@@ -8,7 +8,7 @@ let package = Package(
         .executableTarget(
             name: "AutoRaiseLauncher",
             path: "Launcher",
-            exclude: ["Tests", "Info.plist"]
+            exclude: ["Info.plist"]
         )
     ]
 )

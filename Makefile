@@ -34,5 +34,6 @@ debug: build
 
 update: build install
 
-test: DisplayFocusGate.h test_display_focus_gate.cpp
-	g++ -std=c++17 -Wall -o test_display_focus_gate test_display_focus_gate.cpp && ./test_display_focus_gate
+test: DisplayFocusGate.h test/engine/test_display_focus_gate.cpp Launcher/DelayConversion.swift Launcher/ConfigFile.swift test/launcher/main.swift
+	g++ -std=c++17 -Wall -I. -o test/engine/test_display_focus_gate test/engine/test_display_focus_gate.cpp && ./test/engine/test_display_focus_gate
+	swiftc Launcher/DelayConversion.swift Launcher/ConfigFile.swift test/launcher/main.swift -o test/launcher/pure_tests && ./test/launcher/pure_tests
