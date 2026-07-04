@@ -15,9 +15,9 @@ install: AutoRaise.app
 
 AutoRaise: AutoRaise.mm
         ifeq ($(SKYLIGHT_AVAILABLE), 1)
-	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit -F /System/Library/PrivateFrameworks -framework SkyLight
+	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit -framework ServiceManagement -F /System/Library/PrivateFrameworks -framework SkyLight
         else
-	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit
+	    g++ $(CXXFLAGS) -o $@ $^ -framework AppKit -framework ServiceManagement
         endif
 
 AutoRaise.app: AutoRaise Info.plist AutoRaise.icns
@@ -34,6 +34,5 @@ debug: build
 
 update: build install
 
-test: DisplayFocusGate.h test/engine/test_display_focus_gate.cpp Launcher/DelayConversion.swift Launcher/ConfigFile.swift test/launcher/main.swift
+test: DisplayFocusGate.h test/engine/test_display_focus_gate.cpp
 	g++ -std=c++17 -Wall -I. -o test/engine/test_display_focus_gate test/engine/test_display_focus_gate.cpp && ./test/engine/test_display_focus_gate
-	swiftc Launcher/DelayConversion.swift Launcher/ConfigFile.swift test/launcher/main.swift -o test/launcher/pure_tests && ./test/launcher/pure_tests

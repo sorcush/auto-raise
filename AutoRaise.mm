@@ -27,6 +27,7 @@
 #include <AppKit/AppKit.h>
 #include <Carbon/Carbon.h>
 #include <libproc.h>
+#import <ServiceManagement/ServiceManagement.h>
 #include "DisplayFocusGate.h"
 
 #define AUTORAISE_VERSION "5.6"
@@ -163,6 +164,7 @@ static int disableKey = 0;
 static CGDirectDisplayID lastDisplayID = 0;
 static bool lastDisplayIDValid = false;
 static bool displayFocusArmed = false;
+static bool autoRaiseEnabled = true;
 
 //----------------------------------------yabai focus only methods------------------------------------------
 
@@ -866,7 +868,7 @@ NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
         parameters[kDelay] = @"1";
     }
     if (!parameters[kRequireMouseStop]) { parameters[kRequireMouseStop] = @"true"; }
-    if ([parameters[kPollMillis] intValue] < 5) { parameters[kPollMillis] = @"50"; }
+    if ([parameters[kPollMillis] intValue] < 20) { parameters[kPollMillis] = @"50"; }
     if ([parameters[kMouseDelta] floatValue] < 0) { parameters[kMouseDelta] = @"0"; }
     if ([parameters[kScale] floatValue] < 1) { parameters[kScale] = @"2.0"; }
     if (!parameters[kDisableKey]) { parameters[kDisableKey] = @"control"; }
@@ -979,6 +981,7 @@ void AXCallback(AXObserverRef observer, AXUIElementRef _element, CFStringRef not
 }
 
 void onTick() {
+    if (!autoRaiseEnabled) { return; }
     // determine if mouseMoved
     CGEventRef _event = CGEventCreate(NULL);
     CGPoint mousePoint = CGEventGetLocation(_event);
@@ -1328,6 +1331,188 @@ CGEventRef eventTapHandler(CGEventTapProxy proxy, CGEventType type, CGEventRef e
     return event;
 }
 
+//----------------------------------------menu bar controller-----------------------------------------------
+
+static const int kMinDelayMs = 20;
+static const int kMaxDelayMs = 2000;
+static const int kStepMs = 20;   // == pollMillis, so 20ms steps are real
+static int currentDelayMs = 100;
+
+static int clampDelayMs(int ms) {
+    if (ms < kMinDelayMs) { ms = kMinDelayMs; }
+    if (ms > kMaxDelayMs) { ms = kMaxDelayMs; }
+    return (ms / kStepMs) * kStepMs;
+}
+
+static int delayCountForMs(int ms) {
+    // pollMillis == kStepMs, so delay unit N maps to (N-1)*kStepMs milliseconds.
+    return clampDelayMs(ms) / kStepMs + 1;
+}
+
+@interface AutoRaiseController : NSObject
+@property (strong) NSStatusItem * statusItem;
+@property (strong) NSWindow * prefsWindow;
+@property (strong) NSTextField * delayField;
+@property (strong) NSStepper * delayStepper;
+- (void) setup;
+- (void) rebuildMenu;
+@end
+
+static AutoRaiseController * menuController = nil;
+
+@implementation AutoRaiseController
+
+- (void) setup {
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength: NSVariableStatusItemLength];
+    NSImage * image = [NSImage imageWithSystemSymbolName: @"cursorarrow.rays"
+        accessibilityDescription: @"AutoRaise"];
+    [image setTemplate: YES];
+    self.statusItem.button.image = image;
+    [self rebuildMenu];
+}
+
+- (void) rebuildMenu {
+    NSMenu * menu = [[NSMenu alloc] init];
+
+    NSMenuItem * toggle = [[NSMenuItem alloc] initWithTitle: @"Enable AutoRaise"
+        action: @selector(toggleEnabled:) keyEquivalent: @""];
+    toggle.target = self;
+    toggle.state = autoRaiseEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem: toggle];
+
+    [menu addItem: [NSMenuItem separatorItem]];
+
+    NSMenuItem * delayItem = [[NSMenuItem alloc]
+        initWithTitle: [NSString stringWithFormat: @"Delay: %d ms…", currentDelayMs]
+        action: @selector(openPrefs:) keyEquivalent: @""];
+    delayItem.target = self;
+    [menu addItem: delayItem];
+
+    NSMenuItem * login = [[NSMenuItem alloc] initWithTitle: @"Start at Login"
+        action: @selector(toggleLogin:) keyEquivalent: @""];
+    login.target = self;
+    if (@available(macOS 13.0, *)) {
+        login.state = ([SMAppService mainAppService].status == SMAppServiceStatusEnabled)
+            ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    [menu addItem: login];
+
+    NSMenuItem * ax = [[NSMenuItem alloc] initWithTitle: @"Open Accessibility Settings…"
+        action: @selector(openAccessibility:) keyEquivalent: @""];
+    ax.target = self;
+    [menu addItem: ax];
+
+    [menu addItem: [NSMenuItem separatorItem]];
+
+    NSMenuItem * quit = [[NSMenuItem alloc] initWithTitle: @"Quit AutoRaise"
+        action: @selector(quit:) keyEquivalent: @"q"];
+    quit.target = self;
+    [menu addItem: quit];
+
+    self.statusItem.menu = menu;
+}
+
+- (void) toggleEnabled: (id) sender {
+    autoRaiseEnabled = !autoRaiseEnabled;
+    [[NSUserDefaults standardUserDefaults] setBool: autoRaiseEnabled forKey: @"enabled"];
+    if (autoRaiseEnabled) {
+        // Re-seed display tracking so simply re-enabling doesn't arm a focus.
+        lastDisplayIDValid = false;
+        displayFocusArmed = false;
+    }
+    [self rebuildMenu];
+}
+
+- (void) openPrefs: (id) sender {
+    if (!self.prefsWindow) {
+        NSWindow * w = [[NSWindow alloc]
+            initWithContentRect: NSMakeRect(0, 0, 360, 150)
+            styleMask: (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+            backing: NSBackingStoreBuffered defer: NO];
+        w.title = @"AutoRaise Preferences";
+        [w center];
+        NSView * content = w.contentView;
+
+        NSTextField * label = [NSTextField labelWithString:
+            @"Focus delay after crossing a display (ms):"];
+        label.frame = NSMakeRect(20, 102, 320, 18);
+        [content addSubview: label];
+
+        self.delayField = [[NSTextField alloc] initWithFrame: NSMakeRect(20, 64, 90, 24)];
+        self.delayField.integerValue = currentDelayMs;
+        [content addSubview: self.delayField];
+
+        self.delayStepper = [[NSStepper alloc] initWithFrame: NSMakeRect(114, 62, 20, 28)];
+        self.delayStepper.minValue = kMinDelayMs;
+        self.delayStepper.maxValue = kMaxDelayMs;
+        self.delayStepper.increment = kStepMs;
+        self.delayStepper.integerValue = currentDelayMs;
+        self.delayStepper.target = self;
+        self.delayStepper.action = @selector(stepperChanged:);
+        [content addSubview: self.delayStepper];
+
+        NSTextField * hint = [NSTextField labelWithString:
+            [NSString stringWithFormat: @"%d–%d ms, in %d ms steps.", kMinDelayMs, kMaxDelayMs, kStepMs]];
+        hint.frame = NSMakeRect(20, 40, 320, 16);
+        hint.font = [NSFont systemFontOfSize: 10];
+        hint.textColor = [NSColor secondaryLabelColor];
+        [content addSubview: hint];
+
+        NSButton * setButton = [NSButton buttonWithTitle: @"Set"
+            target: self action: @selector(applyDelay:)];
+        setButton.frame = NSMakeRect(260, 8, 80, 30);
+        setButton.keyEquivalent = @"\r";
+        [content addSubview: setButton];
+
+        self.prefsWindow = w;
+    }
+    self.delayField.integerValue = currentDelayMs;
+    self.delayStepper.integerValue = currentDelayMs;
+    [self.prefsWindow makeKeyAndOrderFront: nil];
+    [NSApp activateIgnoringOtherApps: YES];
+}
+
+- (void) stepperChanged: (id) sender {
+    int ms = clampDelayMs((int) self.delayStepper.integerValue);
+    self.delayField.integerValue = ms;
+    self.delayStepper.integerValue = ms;
+}
+
+- (void) applyDelay: (id) sender {
+    int ms = clampDelayMs((int) self.delayField.integerValue);
+    currentDelayMs = ms;
+    self.delayField.integerValue = ms;
+    self.delayStepper.integerValue = ms;
+    [[NSUserDefaults standardUserDefaults] setInteger: ms forKey: @"delayMs"];
+    delayCount = delayCountForMs(ms);   // applies live; same process
+    [self rebuildMenu];
+    [self.prefsWindow close];
+}
+
+- (void) toggleLogin: (id) sender {
+    if (@available(macOS 13.0, *)) {
+        NSError * error = nil;
+        if ([SMAppService mainAppService].status == SMAppServiceStatusEnabled) {
+            [[SMAppService mainAppService] unregisterAndReturnError: &error];
+        } else {
+            [[SMAppService mainAppService] registerAndReturnError: &error];
+        }
+        if (error) { NSLog(@"AutoRaise: login toggle failed: %@", error); }
+    }
+    [self rebuildMenu];
+}
+
+- (void) openAccessibility: (id) sender {
+    [[NSWorkspace sharedWorkspace] openURL: [NSURL URLWithString:
+        @"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
+}
+
+- (void) quit: (id) sender {
+    [NSApp terminate: nil];
+}
+
+@end
+
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         ConfigClass * config = [[ConfigClass alloc] init];
@@ -1346,6 +1531,15 @@ int main(int argc, const char * argv[]) {
         ignoreSpaceChanged = [parameters[kIgnoreSpaceChanged] boolValue];
         invertIgnoreApps   = [parameters[kInvertIgnoreApps] boolValue];
         invertDisableKey   = [parameters[kInvertDisableKey] boolValue];
+
+        // Merged menu-bar app: poll at the delay step and take delay/enabled state
+        // from UserDefaults (menu-controlled), overriding config delay/pollMillis.
+        pollMillis = kStepMs;
+        NSUserDefaults * defs = [NSUserDefaults standardUserDefaults];
+        currentDelayMs = [defs objectForKey: @"delayMs"]
+            ? clampDelayMs((int) [defs integerForKey: @"delayMs"]) : 100;
+        delayCount = delayCountForMs(currentDelayMs);
+        autoRaiseEnabled = [defs objectForKey: @"enabled"] ? [defs boolForKey: @"enabled"] : true;
 
         printf("\nv%s by sbmpost(c) 2026, usage:\n\nAutoRaise\n", AUTORAISE_VERSION);
         printf("  -pollMillis <20, 30, 40, 50, ...>\n");
@@ -1453,7 +1647,7 @@ int main(int argc, const char * argv[]) {
 #endif
         printf("\n");
 
-        NSDictionary * options = @{(id) CFBridgingRelease(kAXTrustedCheckOptionPrompt): @YES};
+        NSDictionary * options = @{(id) CFBridgingRelease(kAXTrustedCheckOptionPrompt): @NO};
         bool trusted = AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef) options);
         if (verbose) { NSLog(@"AXIsProcessTrusted: %s", trusted ? "YES" : "NO"); }
 
@@ -1490,6 +1684,8 @@ int main(int argc, const char * argv[]) {
 
         findDockApplication();
         findDesktopOrigin();
+        menuController = [[AutoRaiseController alloc] init];
+        [menuController setup];
         [[NSApplication sharedApplication] run];
     }
     return 0;

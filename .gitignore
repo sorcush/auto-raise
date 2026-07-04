@@ -2,6 +2,4 @@ AutoRaise
 AutoRaise.out
 AutoRaise.app
 test/engine/test_display_focus_gate
-test/launcher/pure_tests
 *~
-.build/
