@@ -3,3 +3,4 @@ AutoRaise.out
 AutoRaise.app
 test/engine/test_display_focus_gate
 *~
+.DS_Store
