@@ -1071,7 +1071,7 @@ void onTick() {
         CGDirectDisplayID currentDisplayID = hasScreen ?
             (CGDirectDisplayID)[gateScreen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : 0;
         GateDecision gateDecision = displayFocusGate(
-            currentDisplayID, hasScreen, (delayTicks != 0 || raiseTimes != 0),
+            currentDisplayID, hasScreen, (delayTicks != 0 || raiseTimes != 0), false,
             lastDisplayID, lastDisplayIDValid, displayFocusArmed);
         if (gateDecision.armJustSet) {
             delayTicks = 0; // restart the delay for the new one-shot cycle
