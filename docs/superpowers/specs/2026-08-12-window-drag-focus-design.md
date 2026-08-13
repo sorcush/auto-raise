@@ -249,7 +249,7 @@ are held, so the reset is plain assignment.
 ### Placement in `onTick()`
 
 The drag-tracker block runs **after** the macOS-12 coordinate-correction block
-(so it uses the same corrected `mousePoint` as the rest of the focus path) and
+(so `gateMousePoint` and the corrected `mousePoint` are both available) and
 **before** the `if (ignoreTimes) { … return; }` / `appWasActivated` housekeeping
 at `AutoRaise.mm:1053-1059`.
 
@@ -268,7 +268,7 @@ Per tick, in order:
    and leaves the capture in place; the hold simply may never classify.
 3. Call `windowDragTick(...)`.
 4. Act on the decision:
-   - `captureNow` → `topwindow(mousePoint)`; on a hit, store `kCGWindowNumber`
+   - `captureNow` → `topwindow(gateMousePoint)`; on a hit, store `kCGWindowNumber`
      into `dragWindowID` and `kCGWindowBounds` into `dragWindowBounds`, and set
      `dragBoundsValid` to whether the bounds dictionary parsed. On a miss, set
      `dragWindowID = kCGNullWindowID` and `dragBoundsValid = false`.
@@ -429,6 +429,14 @@ needs revision. Resolution:
 - **Accepted in substance:** integration behavior was untested. `onTick()` has no
   test seam, so the cmd-tab-mid-drag and no-activation-on-press cases were added
   to the manual checklist.
+- **Amended after the final whole-branch review (2026-08-13):** capture originally
+  used the corrected `mousePoint` for consistency with the rest of the focus
+  path. That reasoning was backwards — `WINDOW_CORRECTION` biases the hit test
+  toward the window the pointer is moving *into*, and the menu-bar correction can
+  snap the y coordinate to the screen top, so a press near a window's edge could
+  hit-test outside it and silently skip drag detection for that hold. Capture now
+  uses the raw `gateMousePoint`. The baseline recording always used
+  `gateMousePoint` and is unchanged.
 - **Not accepted as critical:** the poll-latency race. A crossing survives only
   if press, display crossing and release all fall inside roughly one to two
   20 ms poll intervals, and a crossing seen before classification is self-healed
