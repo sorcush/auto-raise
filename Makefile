@@ -34,5 +34,8 @@ debug: build
 
 update: build install
 
-test: DisplayFocusGate.h test/engine/test_display_focus_gate.cpp
-	g++ -std=c++17 -Wall -I. -o test/engine/test_display_focus_gate test/engine/test_display_focus_gate.cpp && ./test/engine/test_display_focus_gate
+test: DisplayFocusGate.h WindowDragTracker.h test/engine/test_display_focus_gate.cpp test/engine/test_window_drag_tracker.cpp
+	g++ -std=c++17 -Wall -I. -o test/engine/test_display_focus_gate test/engine/test_display_focus_gate.cpp
+	g++ -std=c++17 -Wall -I. -o test/engine/test_window_drag_tracker test/engine/test_window_drag_tracker.cpp
+	./test/engine/test_display_focus_gate
+	./test/engine/test_window_drag_tracker

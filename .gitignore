@@ -2,5 +2,6 @@ AutoRaise
 AutoRaise.out
 AutoRaise.app
 test/engine/test_display_focus_gate
+test/engine/test_window_drag_tracker
 *~
 .DS_Store
