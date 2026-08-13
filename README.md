@@ -26,6 +26,11 @@ enables/disables the behavior, and can start at login.
   is raised and focused, exactly once.
 - **Empty desktop after a crossing:** the one-shot stays armed, so if you cross
   onto an empty area and then move to a real window, that window is focused.
+- **Dragging or resizing a window onto another display:** the crossing is
+  ignored, so the window you just moved keeps focus when you let go and move the
+  mouse away. Recognizing a window drag also cancels a focus that was already
+  pending. Dragging something that is *not* a window — a text selection, a
+  rubber-band on the desktop — still counts as a crossing and still arms a focus.
 - **A Mission Control Space change alone** never focuses anything — only a
   display crossing arms a focus.
 

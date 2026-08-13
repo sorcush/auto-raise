@@ -29,6 +29,7 @@
 #include <libproc.h>
 #import <ServiceManagement/ServiceManagement.h>
 #include "DisplayFocusGate.h"
+#include "WindowDragTracker.h"
 
 #define AUTORAISE_VERSION "5.6"
 #define STACK_THRESHOLD 20
@@ -164,6 +165,11 @@ static int disableKey = 0;
 static CGDirectDisplayID lastDisplayID = 0;
 static bool lastDisplayIDValid = false;
 static bool displayFocusArmed = false;
+static bool dragWasButtonDown = false;
+static bool dragClassified = false;
+static CGWindowID dragWindowID = kCGNullWindowID;
+static CGRect dragWindowBounds = CGRectZero;
+static bool dragBoundsValid = false;
 static bool autoRaiseEnabled = true;
 
 //----------------------------------------yabai focus only methods------------------------------------------
@@ -589,6 +595,45 @@ inline NSScreen * findScreen(CGPoint point) {
         }
     }
     return NULL;
+}
+
+// Display id under a point, without the caller repeating the deviceDescription
+// lookup. Returns false when the point is not on any screen.
+inline bool displayIDAt(CGPoint point, CGDirectDisplayID & outID) {
+    NSScreen * screen = findScreen(point);
+    if (!screen) { return false; }
+    outID = (CGDirectDisplayID) [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+    return true;
+}
+
+// Current bounds of one window, by id. Side-effect free: reads the window
+// server only. Returns false when the window is gone or off-screen.
+inline bool windowBoundsForID(CGWindowID windowID, CGRect & outBounds) {
+    if (windowID == kCGNullWindowID) { return false; }
+    CFArrayRef _info = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, windowID);
+    if (!_info) { return false; }
+    bool found = false;
+    if (CFArrayGetCount(_info) > 0) {
+        CFDictionaryRef _window = (CFDictionaryRef) CFArrayGetValueAtIndex(_info, 0);
+        CFDictionaryRef _bounds = (CFDictionaryRef) CFDictionaryGetValue(_window, kCGWindowBounds);
+        if (_bounds) { found = CGRectMakeWithDictionaryRepresentation(_bounds, &outBounds); }
+    }
+    CFRelease(_info);
+    return found;
+}
+
+// Capture the window the user just pressed on: the frontmost normal (layer 0)
+// window whose bounds contain the point. All-or-nothing — on any failure the
+// caller records no capture and the hold can never be classified a drag.
+// Must NOT use get_mousewindow(): that can activate an application.
+inline bool captureDragWindow(CGPoint point, CGWindowID & outID, CGRect & outBounds) {
+    NSDictionary * top_window = topwindow(point);
+    if (!top_window) { return false; }
+    CGWindowID windowID = (CGWindowID) [top_window[(__bridge id) kCGWindowNumber] unsignedIntValue];
+    if (windowID == kCGNullWindowID) { return false; }
+    if (!windowBoundsForID(windowID, outBounds)) { return false; }
+    outID = windowID;
+    return true;
 }
 
 inline bool is_desktop_window(AXUIElementRef _window) {
@@ -1050,6 +1095,70 @@ void onTick() {
         }
     }
 
+    // Window-drag tracking. A display crossing that happens while the user is
+    // dragging or resizing a window must not arm a focus, and recognising a drag
+    // cancels one that is already pending. Runs before the housekeeping returns
+    // below so a press is never missed.
+    bool dragInProgress = false;
+    {
+        bool buttonDown =
+            CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft) ||
+            CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonRight);
+
+        bool boundsChanged = false;
+        if (buttonDown && dragBoundsValid && !dragClassified) {
+            CGRect currentBounds;
+            if (windowBoundsForID(dragWindowID, currentBounds)) {
+                boundsChanged =
+                    fabs(currentBounds.origin.x - dragWindowBounds.origin.x) >= 1 ||
+                    fabs(currentBounds.origin.y - dragWindowBounds.origin.y) >= 1 ||
+                    fabs(currentBounds.size.width - dragWindowBounds.size.width) >= 1 ||
+                    fabs(currentBounds.size.height - dragWindowBounds.size.height) >= 1;
+            }
+        }
+
+        DragTickDecision dragDecision = windowDragTick(
+            buttonDown, boundsChanged, dragWasButtonDown, dragClassified);
+
+        if (dragDecision.captureNow) {
+            dragWindowID = kCGNullWindowID;
+            dragBoundsValid = false;
+            CGWindowID capturedID = kCGNullWindowID;
+            CGRect capturedBounds = CGRectZero;
+            if (captureDragWindow(mousePoint, capturedID, capturedBounds)) {
+                dragWindowID = capturedID;
+                dragWindowBounds = capturedBounds;
+                dragBoundsValid = true;
+            }
+        }
+
+        if (dragDecision.cancelArm) {
+            if (verbose) { NSLog(@"Window drag: cancelled pending focus"); }
+            displayFocusArmed = false;
+            delayTicks = 0;
+            raiseTimes = 0;
+        }
+
+        if (dragDecision.releaseCapture) {
+            dragWindowID = kCGNullWindowID;
+            dragBoundsValid = false;
+        }
+
+        dragInProgress = dragDecision.dragging;
+
+        // Keep the display baseline current during a drag. The gate below sits
+        // after the ignoreTimes/appWasActivated early returns, so on a tick that
+        // returns there it records nothing — and a release right after such a
+        // tick would then look like a crossing. Recording here closes that.
+        if (dragInProgress) {
+            CGDirectDisplayID draggingDisplayID = 0;
+            if (displayIDAt(gateMousePoint, draggingDisplayID)) {
+                lastDisplayID = draggingDisplayID;
+                lastDisplayIDValid = true;
+            }
+        }
+    }
+
     if (ignoreTimes) {
         ignoreTimes--;
         return;
@@ -1066,12 +1175,10 @@ void onTick() {
     // Must run before the requireMouseStop early-return below, because a crossing
     // always happens mid-motion.
     {
-        NSScreen * gateScreen = findScreen(gateMousePoint);
-        bool hasScreen = gateScreen != nil;
-        CGDirectDisplayID currentDisplayID = hasScreen ?
-            (CGDirectDisplayID)[gateScreen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : 0;
+        CGDirectDisplayID currentDisplayID = 0;
+        bool hasScreen = displayIDAt(gateMousePoint, currentDisplayID);
         GateDecision gateDecision = displayFocusGate(
-            currentDisplayID, hasScreen, (delayTicks != 0 || raiseTimes != 0), false,
+            currentDisplayID, hasScreen, (delayTicks != 0 || raiseTimes != 0), dragInProgress,
             lastDisplayID, lastDisplayIDValid, displayFocusArmed);
         if (gateDecision.armJustSet) {
             delayTicks = 0; // restart the delay for the new one-shot cycle
@@ -1419,6 +1526,11 @@ static AutoRaiseController * menuController = nil;
         // Re-seed display tracking so simply re-enabling doesn't arm a focus.
         lastDisplayIDValid = false;
         displayFocusArmed = false;
+        // Drop any hold that was in progress while disabled.
+        dragWasButtonDown = false;
+        dragClassified = false;
+        dragWindowID = kCGNullWindowID;
+        dragBoundsValid = false;
     }
     [self rebuildMenu];
 }
