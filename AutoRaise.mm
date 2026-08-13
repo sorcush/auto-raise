@@ -607,7 +607,10 @@ inline bool displayIDAt(CGPoint point, CGDirectDisplayID & outID) {
 }
 
 // Current bounds of one window, by id. Side-effect free: reads the window
-// server only. Returns false when the window is gone or off-screen.
+// server only. Returns false when the window is gone, or when its bounds are
+// missing or unparseable. Note kCGWindowListOptionIncludingWindow is NOT
+// filtered by on-screen state, so an off-screen or minimised window still
+// yields bounds.
 inline bool windowBoundsForID(CGWindowID windowID, CGRect & outBounds) {
     if (windowID == kCGNullWindowID) { return false; }
     CFArrayRef _info = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, windowID);
@@ -1125,7 +1128,7 @@ void onTick() {
             dragBoundsValid = false;
             CGWindowID capturedID = kCGNullWindowID;
             CGRect capturedBounds = CGRectZero;
-            if (captureDragWindow(mousePoint, capturedID, capturedBounds)) {
+            if (captureDragWindow(gateMousePoint, capturedID, capturedBounds)) {
                 dragWindowID = capturedID;
                 dragWindowBounds = capturedBounds;
                 dragBoundsValid = true;
