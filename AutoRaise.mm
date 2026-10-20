@@ -402,6 +402,10 @@ AXUIElementRef get_raisable_window(AXUIElementRef _element, CGPoint point, int c
                 }
             }
             CFRelease(_element);
+            // Deeply nested web content (Microsoft Teams) can exceed the threshold, and
+            // its kAXWindowAttribute answers with the application, not the window.
+            // Resolve the window by position instead of unwinding to that attribute.
+            _window = fallback(point);
         } else {
             CFStringRef _element_role = NULL;
             AXUIElementCopyAttributeValue(_element, kAXRoleAttribute, (CFTypeRef *) &_element_role);
@@ -1228,9 +1232,14 @@ void onTick() {
         AXUIElementRef _mouseWindow = get_mousewindow(mousePoint);
         if (_mouseWindow) {
             pid_t mouseWindow_pid;
-            if (AXUIElementGetPid(_mouseWindow, &mouseWindow_pid) == kAXErrorSuccess) {
-                CGWindowID mouseWindow_id;
-                _AXUIElementGetWindow(_mouseWindow, &mouseWindow_id);
+            CGWindowID mouseWindow_id = kCGNullWindowID;
+            // An element without a window id is not a window. Treat it as no raisable
+            // window: an id of kCGNullWindowID would otherwise match the "destroyed"
+            // sentinel below and be mistaken for a window that just closed.
+            if (_AXUIElementGetWindow(_mouseWindow, &mouseWindow_id) != kAXErrorSuccess ||
+                mouseWindow_id == kCGNullWindowID) {
+                if (verbose) { NSLog(@"Mouse window has no window id"); }
+            } else if (AXUIElementGetPid(_mouseWindow, &mouseWindow_pid) == kAXErrorSuccess) {
                 bool mouseWindowPresent = mouseWindow_id != lastDestroyedMouseWindow_id;
                 if (mouseWindowPresent) {
                     static CGWindowID previous_id = kCGNullWindowID;
